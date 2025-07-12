@@ -28,6 +28,15 @@ cp config_manager.py "$TEMP_DIR/"
 cp training_help.py "$TEMP_DIR/"
 cp train.sh "$TEMP_DIR/"
 cp train_multi_gpu.sh "$TEMP_DIR/"
+cp train_persistent.sh "$TEMP_DIR/"
+cp train_auto_restart.sh "$TEMP_DIR/"
+
+echo "📚 Copying documentation..."
+# Copy documentation files
+cp CLI_SYSTEM_OVERVIEW.md "$TEMP_DIR/"
+cp MULTI_GPU_GUIDE.md "$TEMP_DIR/"
+cp PERSISTENCE_GUIDE.md "$TEMP_DIR/"
+cp INSTALLATION.md "$TEMP_DIR/"
 
 echo "📚 Creating README for RunPod..."
 # Create comprehensive README for RunPod
@@ -44,9 +53,10 @@ This package provides a comprehensive CLI system for training language models on
    chmod +x runpod_setup_script.sh
    ./runpod_setup_script.sh
    ```
-3. **Start training with a preset:**
+3. **Start persistent training:**
    ```bash
-   ./train_runpod.sh qwen-python
+   ./train_persistent.sh quick-single    # Single GPU
+   ./train_persistent.sh quick-multi     # Multi-GPU
    ```
 
 ## 🎮 CLI Commands
@@ -77,6 +87,25 @@ This package provides a comprehensive CLI system for training language models on
 ./train_multi_gpu.sh qwen-python-4gpu    # 4 GPU Python coder (high memory)
 ./train_multi_gpu.sh llama-python-multi  # 2 GPU Llama Python coder
 ./train_multi_gpu.sh custom 0,1,2,3      # Custom GPU configuration
+```
+
+### Persistent Training (Survives Disconnects)
+```bash
+./train_persistent.sh tmux ./train_runpod.sh qwen-python  # Start persistent
+./train_persistent.sh quick-single                       # Quick single GPU
+./train_persistent.sh quick-multi                        # Quick multi-GPU
+./train_persistent.sh list                               # List sessions
+./train_persistent.sh attach                             # Attach to session
+./train_persistent.sh logs                               # View logs
+./train_persistent.sh stop                               # Stop training
+```
+
+### Auto-Restart Training (Handles Crashes)
+```bash
+./train_auto_restart.sh --persistent ./train_runpod.sh qwen-python
+./train_auto_restart.sh status      # Check status
+./train_auto_restart.sh logs        # View auto-restart logs
+./train_auto_restart.sh stop        # Stop auto-restart
 ```
 
 ### Monitoring & Management

@@ -228,6 +228,13 @@ show_runpod_help() {
     echo "  ./train_runpod.sh cleanup        - Clean up old files"
     echo "  ./train_runpod.sh package        - Package trained model"
     echo ""
+    print_color $YELLOW "Persistent Training (survives SSH disconnects):"
+    echo "  ./train_persistent.sh tmux ./train_runpod.sh qwen-python"
+    echo "  ./train_persistent.sh quick-single   - Quick persistent single GPU"
+    echo "  ./train_persistent.sh quick-multi    - Quick persistent multi-GPU"
+    echo "  ./train_persistent.sh list           - List active sessions"
+    echo "  ./train_persistent.sh attach         - Attach to last session"
+    echo ""
 }
 
 check_gpu() {
@@ -380,6 +387,34 @@ main() {
                 ./train_multi_gpu.sh detect
             else
                 print_color $RED "❌ Multi-GPU script not found. Run setup first."
+            fi
+            ;;
+        "persistent")
+            if [ -f "train_persistent.sh" ]; then
+                ./train_persistent.sh "${@:2}"
+            else
+                print_color $RED "❌ Persistent training script not found. Run setup first."
+            fi
+            ;;
+        "tmux")
+            if [ -f "train_persistent.sh" ]; then
+                ./train_persistent.sh tmux ./train_runpod.sh "${@:2}"
+            else
+                print_color $RED "❌ Persistent training script not found. Run setup first."
+            fi
+            ;;
+        "attach")
+            if [ -f "train_persistent.sh" ]; then
+                ./train_persistent.sh attach
+            else
+                print_color $RED "❌ Persistent training script not found. Run setup first."
+            fi
+            ;;
+        "sessions")
+            if [ -f "train_persistent.sh" ]; then
+                ./train_persistent.sh list
+            else
+                print_color $RED "❌ Persistent training script not found. Run setup first."
             fi
             ;;
         *)

@@ -31,28 +31,53 @@ This repository provides a complete pipeline for:
 
 ## 🚀 Quick Start
 
-### 1. Setup Environment
+### 1. Clone and Install
 
 ```bash
-# Make scripts executable
-chmod +x setup_environment.sh run_training.sh
+# Clone the repository
+git clone https://github.com/PapaBear1981/RunPod-AI-Trainer.git
+cd RunPod-AI-Trainer
+git checkout feature/cli-multi-gpu-system
 
-# Run setup (installs dependencies, creates directories)
-./setup_environment.sh
+# One-liner setup (recommended)
+sudo ./install.sh
+
+# OR quick setup (no sudo needed)
+./quick_install.sh
+
+# OR minimal setup
+./setup_runpod.sh
 ```
 
-### 2. Verify Setup
+### 2. Start Training
 
 ```bash
-# Test that everything is working
-python test_setup.py
+# Load environment
+source .env
+
+# Single GPU training
+./train_runpod.sh qwen-python
+
+# Multi-GPU training (if you have 2+ GPUs)
+./train_multi_gpu.sh qwen-python-multi
 ```
 
-### 3. Start Training
+### 3. Explore the CLI System
 
 ```bash
-# Launch training with monitoring
-./run_training.sh
+# See all available presets
+./train_runpod.sh presets
+
+# Interactive configuration
+./train_runpod.sh interactive
+
+# Multi-GPU detection and recommendations
+./train_multi_gpu.sh detect
+./train_multi_gpu.sh recommend
+
+# Get comprehensive help
+./train_runpod.sh help
+python3 training_help.py
 ```
 
 ## ⚙️ Configuration
