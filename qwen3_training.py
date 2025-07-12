@@ -7,7 +7,8 @@ Using LoRA/QLoRA for efficient training on A40 GPU (48GB VRAM)
 import os
 import torch
 import logging
-from dataclasses import dataclass
+import argparse
+from dataclasses import dataclass, asdict
 from typing import Optional
 import json
 
@@ -37,6 +38,12 @@ class ModelConfig:
     # Model settings
     model_name: str = "Qwen/Qwen3-8B"  # Using Qwen2.5-8B as it's more recent
     max_seq_length: int = 1024  # Reduced for RTX 4090 memory constraints
+
+    # Multi-GPU settings
+    use_multi_gpu: bool = False  # Enable multi-GPU training
+    gpu_ids: str = "0"  # Comma-separated GPU IDs (e.g., "0,1,2,3")
+    ddp_backend: str = "nccl"  # Distributed backend (nccl for GPU, gloo for CPU)
+    ddp_find_unused_parameters: bool = False  # Find unused parameters in DDP
     
     # LoRA settings optimized for RTX 4090 (24GB VRAM)
     lora_r: int = 32
@@ -186,23 +193,382 @@ def format_instruction_data(example):
     
     return {"text": prompt}
 
+def create_cli_parser():
+    """Create command line argument parser"""
+    parser = argparse.ArgumentParser(
+        description="Fine-tune language models with LoRA/QLoRA",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+
+    # Model settings
+    model_group = parser.add_argument_group('Model Settings')
+    model_group.add_argument(
+        "--model_name",
+        type=str,
+        default="Qwen/Qwen2.5-8B",
+        help="HuggingFace model name or path"
+    )
+    model_group.add_argument(
+        "--max_seq_length",
+        type=int,
+        default=1024,
+        help="Maximum sequence length for training"
+    )
+
+    # LoRA settings
+    lora_group = parser.add_argument_group('LoRA Settings')
+    lora_group.add_argument(
+        "--lora_r",
+        type=int,
+        default=32,
+        help="LoRA rank (higher = more parameters, better quality)"
+    )
+    lora_group.add_argument(
+        "--lora_alpha",
+        type=int,
+        default=64,
+        help="LoRA alpha (scaling factor, typically 2x lora_r)"
+    )
+    lora_group.add_argument(
+        "--lora_dropout",
+        type=float,
+        default=0.1,
+        help="LoRA dropout rate"
+    )
+
+    # Quantization settings
+    quant_group = parser.add_argument_group('Quantization Settings')
+    quant_group.add_argument(
+        "--quantization",
+        type=str,
+        choices=["none", "4bit", "8bit"],
+        default="4bit",
+        help="Quantization type (none, 4bit, 8bit)"
+    )
+    quant_group.add_argument(
+        "--bnb_4bit_compute_dtype",
+        type=str,
+        choices=["float16", "bfloat16"],
+        default="bfloat16",
+        help="Compute dtype for 4-bit quantization"
+    )
+    quant_group.add_argument(
+        "--bnb_4bit_quant_type",
+        type=str,
+        choices=["fp4", "nf4"],
+        default="nf4",
+        help="4-bit quantization type"
+    )
+
+    # Training settings
+    train_group = parser.add_argument_group('Training Settings')
+    train_group.add_argument(
+        "--output_dir",
+        type=str,
+        default="./trained-model",
+        help="Output directory for the trained model"
+    )
+    train_group.add_argument(
+        "--num_train_epochs",
+        type=int,
+        default=3,
+        help="Number of training epochs"
+    )
+    train_group.add_argument(
+        "--per_device_train_batch_size",
+        type=int,
+        default=2,
+        help="Training batch size per device"
+    )
+    train_group.add_argument(
+        "--gradient_accumulation_steps",
+        type=int,
+        default=8,
+        help="Gradient accumulation steps"
+    )
+    train_group.add_argument(
+        "--learning_rate",
+        type=float,
+        default=2e-4,
+        help="Learning rate"
+    )
+    train_group.add_argument(
+        "--weight_decay",
+        type=float,
+        default=0.01,
+        help="Weight decay"
+    )
+    train_group.add_argument(
+        "--warmup_ratio",
+        type=float,
+        default=0.1,
+        help="Warmup ratio"
+    )
+    train_group.add_argument(
+        "--lr_scheduler_type",
+        type=str,
+        default="cosine",
+        help="Learning rate scheduler type"
+    )
+
+    # Dataset settings
+    data_group = parser.add_argument_group('Dataset Settings')
+    data_group.add_argument(
+        "--dataset_name",
+        type=str,
+        default="iamtarun/python_code_instructions_18k_alpaca",
+        help="HuggingFace dataset name"
+    )
+    data_group.add_argument(
+        "--dataset_split",
+        type=str,
+        default="train",
+        help="Dataset split to use"
+    )
+    data_group.add_argument(
+        "--max_samples",
+        type=int,
+        default=None,
+        help="Maximum number of samples to use (None for all)"
+    )
+
+    # Optimization settings
+    opt_group = parser.add_argument_group('Optimization Settings')
+    opt_group.add_argument(
+        "--optim",
+        type=str,
+        default="paged_adamw_8bit",
+        help="Optimizer type"
+    )
+    opt_group.add_argument(
+        "--gradient_checkpointing",
+        action="store_true",
+        default=True,
+        help="Enable gradient checkpointing"
+    )
+    opt_group.add_argument(
+        "--no_gradient_checkpointing",
+        dest="gradient_checkpointing",
+        action="store_false",
+        help="Disable gradient checkpointing"
+    )
+
+    # Logging and saving
+    log_group = parser.add_argument_group('Logging and Saving')
+    log_group.add_argument(
+        "--logging_steps",
+        type=int,
+        default=10,
+        help="Log every N steps"
+    )
+    log_group.add_argument(
+        "--save_steps",
+        type=int,
+        default=500,
+        help="Save checkpoint every N steps"
+    )
+    log_group.add_argument(
+        "--save_total_limit",
+        type=int,
+        default=3,
+        help="Maximum number of checkpoints to keep"
+    )
+
+    # Multi-GPU settings
+    gpu_group = parser.add_argument_group('Multi-GPU Settings')
+    gpu_group.add_argument(
+        "--use_multi_gpu",
+        action="store_true",
+        help="Enable multi-GPU training"
+    )
+    gpu_group.add_argument(
+        "--gpu_ids",
+        type=str,
+        default="0",
+        help="Comma-separated GPU IDs (e.g., '0,1,2,3')"
+    )
+    gpu_group.add_argument(
+        "--ddp_backend",
+        type=str,
+        choices=["nccl", "gloo"],
+        default="nccl",
+        help="Distributed backend (nccl for GPU, gloo for CPU)"
+    )
+    gpu_group.add_argument(
+        "--ddp_find_unused_parameters",
+        action="store_true",
+        help="Find unused parameters in DDP (slower but more robust)"
+    )
+
+    # Misc settings
+    misc_group = parser.add_argument_group('Miscellaneous')
+    misc_group.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed"
+    )
+    misc_group.add_argument(
+        "--push_to_hub",
+        action="store_true",
+        help="Push model to HuggingFace Hub after training"
+    )
+    misc_group.add_argument(
+        "--config_file",
+        type=str,
+        help="Load configuration from JSON file"
+    )
+    misc_group.add_argument(
+        "--save_config",
+        type=str,
+        help="Save current configuration to JSON file"
+    )
+
+    return parser
+
+def load_config_from_file(config_file: str) -> dict:
+    """Load configuration from JSON file"""
+    with open(config_file, 'r') as f:
+        return json.load(f)
+
+def save_config_to_file(config: ModelConfig, config_file: str):
+    """Save configuration to JSON file"""
+    with open(config_file, 'w') as f:
+        json.dump(asdict(config), f, indent=2)
+    logger.info(f"Configuration saved to {config_file}")
+
+def setup_multi_gpu_environment(config: ModelConfig):
+    """Setup multi-GPU training environment"""
+    import os
+
+    # Set CUDA_VISIBLE_DEVICES
+    os.environ["CUDA_VISIBLE_DEVICES"] = config.gpu_ids
+    logger.info(f"🖥️  Setting CUDA_VISIBLE_DEVICES={config.gpu_ids}")
+
+    # Verify GPUs are available
+    gpu_ids = [int(x.strip()) for x in config.gpu_ids.split(',')]
+    available_gpus = torch.cuda.device_count()
+
+    if available_gpus < len(gpu_ids):
+        logger.warning(f"⚠️  Requested {len(gpu_ids)} GPUs but only {available_gpus} available")
+        # Adjust to available GPUs
+        config.gpu_ids = ','.join([str(i) for i in range(available_gpus)])
+        logger.info(f"🔧 Adjusted to use GPUs: {config.gpu_ids}")
+
+    # Set distributed training environment variables
+    if len(gpu_ids) > 1:
+        os.environ["WORLD_SIZE"] = str(len(gpu_ids))
+        os.environ["NCCL_P2P_DISABLE"] = "1"  # Disable P2P for stability
+        logger.info(f"🌍 World size set to {len(gpu_ids)}")
+
+def update_config_from_args(config: ModelConfig, args: argparse.Namespace) -> ModelConfig:
+    """Update ModelConfig with command line arguments"""
+    # Model settings
+    config.model_name = args.model_name
+    config.max_seq_length = args.max_seq_length
+
+    # LoRA settings
+    config.lora_r = args.lora_r
+    config.lora_alpha = args.lora_alpha
+    config.lora_dropout = args.lora_dropout
+
+    # Quantization settings
+    config.use_4bit = args.quantization == "4bit"
+    config.bnb_4bit_compute_dtype = args.bnb_4bit_compute_dtype
+    config.bnb_4bit_quant_type = args.bnb_4bit_quant_type
+    config.use_nested_quant = args.quantization == "4bit"
+
+    # Training settings
+    config.output_dir = args.output_dir
+    config.num_train_epochs = args.num_train_epochs
+    config.per_device_train_batch_size = args.per_device_train_batch_size
+    config.gradient_accumulation_steps = args.gradient_accumulation_steps
+    config.learning_rate = args.learning_rate
+    config.weight_decay = args.weight_decay
+    config.warmup_ratio = args.warmup_ratio
+    config.lr_scheduler_type = args.lr_scheduler_type
+
+    # Dataset settings
+    config.dataset_name = args.dataset_name
+    config.dataset_split = args.dataset_split
+    config.max_samples = args.max_samples
+
+    # Optimization settings
+    config.optim = args.optim
+    config.gradient_checkpointing = args.gradient_checkpointing
+
+    # Logging and saving
+    config.logging_steps = args.logging_steps
+    config.save_steps = args.save_steps
+    config.save_total_limit = args.save_total_limit
+
+    # Multi-GPU settings
+    config.use_multi_gpu = args.use_multi_gpu
+    config.gpu_ids = args.gpu_ids
+    config.ddp_backend = args.ddp_backend
+    config.ddp_find_unused_parameters = args.ddp_find_unused_parameters
+
+    # Misc
+    config.seed = args.seed
+    config.push_to_hub = args.push_to_hub
+
+    return config
+
 def main():
     """Main training function"""
+    # Parse command line arguments
+    parser = create_cli_parser()
+    args = parser.parse_args()
+
     # Initialize configuration
     config = ModelConfig()
-    
+
+    # Load config from file if specified
+    if args.config_file:
+        logger.info(f"Loading configuration from {args.config_file}")
+        file_config = load_config_from_file(args.config_file)
+        # Update config with file values
+        for key, value in file_config.items():
+            if hasattr(config, key):
+                setattr(config, key, value)
+
+    # Update config with command line arguments (these override file config)
+    config = update_config_from_args(config, args)
+
+    # Save config if requested
+    if args.save_config:
+        save_config_to_file(config, args.save_config)
+        return
+
+    # Setup multi-GPU environment if requested
+    if config.use_multi_gpu:
+        setup_multi_gpu_environment(config)
+
     # Set seed for reproducibility
     set_seed(config.seed)
-    
-    logger.info("Starting Qwen3-8B fine-tuning on Python code instructions")
-    logger.info(f"Output directory: {config.output_dir}")
-    
+
+    logger.info("🚀 Starting fine-tuning with the following configuration:")
+    logger.info(f"📦 Model: {config.model_name}")
+    logger.info(f"📊 Dataset: {config.dataset_name}")
+    logger.info(f"🔧 Quantization: {'4-bit' if config.use_4bit else 'None'}")
+    logger.info(f"🎯 LoRA r={config.lora_r}, alpha={config.lora_alpha}")
+    logger.info(f"📁 Output directory: {config.output_dir}")
+    logger.info(f"🔄 Epochs: {config.num_train_epochs}")
+    logger.info(f"📏 Batch size: {config.per_device_train_batch_size} (effective: {config.per_device_train_batch_size * config.gradient_accumulation_steps})")
+
+    if config.use_multi_gpu:
+        gpu_count = len(config.gpu_ids.split(','))
+        effective_batch_size = config.per_device_train_batch_size * config.gradient_accumulation_steps * gpu_count
+        logger.info(f"🖥️  Multi-GPU: {gpu_count} GPUs ({config.gpu_ids})")
+        logger.info(f"📏 Total effective batch size: {effective_batch_size}")
+        logger.info(f"🔗 DDP Backend: {config.ddp_backend}")
+
     # Create output directory
     os.makedirs(config.output_dir, exist_ok=True)
-    
+
     # Save config for reference
     with open(os.path.join(config.output_dir, "training_config.json"), "w") as f:
-        json.dump(config.__dict__, f, indent=2)
+        json.dump(asdict(config), f, indent=2)
     
     # Load model and tokenizer
     model, tokenizer = load_and_prepare_model(config)
@@ -240,6 +606,9 @@ def main():
         bf16=True,  # Use bfloat16 for training
         remove_unused_columns=False,
         seed=config.seed,
+        # Multi-GPU settings
+        ddp_backend=config.ddp_backend if config.use_multi_gpu else None,
+        ddp_find_unused_parameters=config.ddp_find_unused_parameters if config.use_multi_gpu else False,
     )
     
     # Initialize trainer
