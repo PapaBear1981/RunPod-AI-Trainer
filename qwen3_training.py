@@ -123,38 +123,60 @@ def setup_lora_config(config: ModelConfig) -> LoraConfig:
 
 def load_and_prepare_model(config: ModelConfig):
     """Load and prepare the model and tokenizer"""
+    import os
+
     logger.info(f"Loading model: {config.model_name}")
-    
+
     # Setup quantization
     bnb_config = setup_quantization_config(config)
-    
+
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(
         config.model_name,
         trust_remote_code=True,
         padding_side="right",  # Important for training
     )
-    
+
     # Add pad token if it doesn't exist
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
         tokenizer.pad_token_id = tokenizer.eos_token_id
-    
+
+    # Determine device_map based on distributed training
+    device_map = None
+    if config.use_multi_gpu and "RANK" in os.environ:
+        # For distributed training, don't use device_map="auto"
+        device_map = None
+        logger.info("🔧 Using distributed training - device_map set to None")
+    else:
+        # For single GPU or non-distributed training
+        device_map = "auto"
+        logger.info("🔧 Using single GPU - device_map set to auto")
+
     # Load model
     model = AutoModelForCausalLM.from_pretrained(
         config.model_name,
         quantization_config=bnb_config,
-        device_map="auto",
+        device_map=device_map,
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,
         attn_implementation="eager",  # Use Flash Attention for efficiency
         use_cache=False,  # Disable for training
     )
-    
+
     # Enable gradient checkpointing for memory efficiency
     if config.gradient_checkpointing:
         model.gradient_checkpointing_enable()
-    
+
+    # Handle multi-GPU with DataParallel for simpler setup
+    if config.use_multi_gpu and not ("RANK" in os.environ):
+        # Use DataParallel for simpler multi-GPU setup
+        gpu_ids = [int(x.strip()) for x in config.gpu_ids.split(',')]
+        if len(gpu_ids) > 1 and torch.cuda.device_count() >= len(gpu_ids):
+            logger.info(f"🔧 Using DataParallel for multi-GPU training on GPUs: {gpu_ids}")
+            model = torch.nn.DataParallel(model, device_ids=gpu_ids)
+            model = model.cuda()
+
     logger.info(f"Model loaded successfully. Parameters: {model.num_parameters():,}")
     return model, tokenizer
 
@@ -440,6 +462,7 @@ def save_config_to_file(config: ModelConfig, config_file: str):
 def setup_multi_gpu_environment(config: ModelConfig):
     """Setup multi-GPU training environment"""
     import os
+    import torch.distributed as dist
 
     # Set CUDA_VISIBLE_DEVICES
     os.environ["CUDA_VISIBLE_DEVICES"] = config.gpu_ids
@@ -460,6 +483,26 @@ def setup_multi_gpu_environment(config: ModelConfig):
         os.environ["WORLD_SIZE"] = str(len(gpu_ids))
         os.environ["NCCL_P2P_DISABLE"] = "1"  # Disable P2P for stability
         logger.info(f"🌍 World size set to {len(gpu_ids)}")
+
+        # Initialize distributed training if using torchrun
+        if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
+            rank = int(os.environ["RANK"])
+            world_size = int(os.environ["WORLD_SIZE"])
+            local_rank = int(os.environ.get("LOCAL_RANK", 0))
+
+            logger.info(f"🔧 Initializing distributed training: rank={rank}, world_size={world_size}, local_rank={local_rank}")
+
+            # Set device for this process
+            torch.cuda.set_device(local_rank)
+
+            # Initialize process group
+            if not dist.is_initialized():
+                dist.init_process_group(
+                    backend=config.ddp_backend,
+                    rank=rank,
+                    world_size=world_size
+                )
+                logger.info(f"✅ Distributed training initialized with {config.ddp_backend} backend")
 
 def update_config_from_args(config: ModelConfig, args: argparse.Namespace) -> ModelConfig:
     """Update ModelConfig with command line arguments"""
